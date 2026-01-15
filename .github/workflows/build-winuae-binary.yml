@@ -19,6 +19,9 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    - name: Add MSBuild to PATH
+      uses: microsoft/setup-msbuild@v2
+      
     - name: Install Visual Studio Build Tools
       shell: pwsh
       run: |
@@ -64,6 +67,9 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    - name: Add MSBuild to PATH
+      uses: microsoft/setup-msbuild@v2
+      
     - name: Install Visual Studio Build Tools
       shell: pwsh
       run: |
