@@ -5559,7 +5559,7 @@ static void lts_null(void)
 			denise_hcounter &= 511;
 			denise_hcounter_next++;
 			denise_hcounter_next &= 511;
-		denise_pixtotal++;
+			denise_pixtotal++;
 		}
 		if (denise_pixtotal == 0) {
 			internal_pixel_start_cnt = internal_pixel_cnt;
@@ -5681,7 +5681,7 @@ static void get_line(int monid, int gfx_ypos, enum nln_how how, int lol_shift_pr
 	denise_pixtotal *= 2;
 
 	if (buf1) {
-	int maxw = (uae_u32*)xlinebuffer_end - buf1;
+		int maxw = (uae_u32*)xlinebuffer_end - buf1;
 		if ((denise_pixtotal_max << hresolution) > maxw) {
 			denise_pixtotal_max = maxw >> hresolution;
 		}
