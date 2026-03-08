@@ -407,6 +407,7 @@ static bool ecs_genlock_features_active;
 static uae_u8 ecs_genlock_features_mask;
 static bool ecs_genlock_features_colorkey;
 static bool aga_genlock_features_zdclken;
+static int doublescan2xx;
 
 uae_sem_t gui_sem;
 
@@ -1393,8 +1394,9 @@ static void center_image(void)
 		visible_left_border = maxdiw - w;
 		visible_left_border &= ~((xshift(1, 0)) - 1);
 
+		int hresdb = hresolution_inv + (doublescan == 1 ? 1 : 0);
 		int ww = (diwlastword_total - diwfirstword_total) >> hresolution_inv;
-		int wx = ((diwfirstword_total) >> hresolution_inv) - (((hdisplay_left_border - 1) * 4) >> (hresolution_inv + (doublescan == 1 ? 1 : 0)));
+		int wx = ((diwfirstword_total) >> hresdb) - (((hdisplay_left_border - 1) * 4) >> hresdb);
 
 		if (ww < w && currprefs.gfx_xcenter == 2) {
 			/* Try to center. */
@@ -3233,9 +3235,24 @@ static void expand_bplcon1(uae_u16 v)
 	check_lts_request();
 }
 
+int getvresolution(void)
+{
+	int v = currprefs.gfx_vresolution;
+	if (v < 0) {
+		return 0;
+	}
+	return v;
+}
+
 int gethresolution(void)
 {
-	int h = currprefs.gfx_resolution;
+	int h = currprefs.gfx_resolution - doublescan2x - doublescan2xx;
+	if (h < 0) {
+		h = 0;
+	}
+	if (h > RES_MAX2X) { 
+		h = RES_MAX2X;
+	}
 	if (autoswitch_old_resolution == RES_HIRES && currprefs.gfx_resolution == RES_SUPERHIRES) {
 		h--;
 	}
@@ -3245,10 +3262,12 @@ int gethresolution(void)
 static void sethresolution(void)
 {
 	hresolution = currprefs.gfx_resolution;
+	doublescan2xx = 0;
 	if (doublescan == 1) {
 		hresolution++;
 		if (hresolution > RES_SUPERHIRES) {
 			hresolution = RES_SUPERHIRES;
+			doublescan2xx = 1;
 		}
 	}
 	hresolution_inv = RES_MAX - hresolution;
@@ -5452,6 +5471,7 @@ void end_draw_denise(void)
 static uae_u8 blc_prev[3];
 static void emulate_black_level_calibration(uae_u32 *b1, uae_u32 *b2, uae_u32 *db, int dtotal, int cstart, int clen)
 {
+	bool useb2 = b1 != b2 && b2;
 	int shift = hresolution + 1;
 	int off = cstart << shift;
 
@@ -5474,8 +5494,11 @@ static void emulate_black_level_calibration(uae_u32 *b1, uae_u32 *b2, uae_u32 *d
 		}
 	}
 	if (!cnt) {
+		memcpy(b1, db, (dtotal * sizeof(uae_u32)) << shift);
+		if (useb2) {
+			memcpy(b2, db, (dtotal * sizeof(uae_u32)) << shift);
+		}
 		return;
-
 	}
 
 #if 1
@@ -5494,7 +5517,6 @@ static void emulate_black_level_calibration(uae_u32 *b1, uae_u32 *b2, uae_u32 *d
 //	if (outc[0] > 10 || outc[1] > 10 || outc[2] > 10)
 //		write_log("%02x %02x %02x\n", outc[0], outc[1], outc[2]);
 
-	bool useb2 = b1 != b2 && b2;
 	if (outc[0] <= 3 && outc[1] <= 3 && outc[2] <= 3) {
 		memcpy(b1, db, (dtotal * sizeof(uae_u32)) << shift);
 		if (useb2) {
@@ -5513,10 +5535,7 @@ static void emulate_black_level_calibration(uae_u32 *b1, uae_u32 *b2, uae_u32 *d
 						if (c[j] <= outc[j]) {
 							c[j] = 0;
 						} else {
-							int cc = c[j] + outc[j];
-							if (cc >= 256) {
-								cc = 255;
-							}
+							uae_u8 cc = c[j] - outc[j];
 							c[j] = cc;
 						}
 					}
@@ -5548,7 +5567,6 @@ static uae_u32 filter_pixel(uae_u32 p1, uae_u32 p2)
 // ultra extreme debug pixel patterns
 static uint32_t decode_denise_specials_debug(uint32_t v, int inc)
 {
-	*buf_d++ = v;
 	if (decode_specials_debug > 1) {
 		int t = ((inc >> 1) + this_line->linear_vpos + 1) & 3;
 		if (denise_blank_active2) {
@@ -5586,6 +5604,7 @@ static uint32_t decode_denise_specials_debug(uint32_t v, int inc)
 			}
 		}
 	}
+	*buf_d++ = v;
 	return v;
 }
 
