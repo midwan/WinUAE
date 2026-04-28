@@ -483,9 +483,10 @@ static bool get_trace(uaecptr addr, int accessmode, int size, uae_u32 *data)
 			}
 			check_trace();
 
-			// Partially fix 6.0.x statefiles where 68000 word read value was stored as a zero.
+			// Partially fix 6.0.0-6.0.3 statefiles where 68000 word read value was stored as a zero.
 			// This can be only fixed when it was 68000 instruction prefetch.
-			if ((get_statefile_version() & 0xffffff00) == 0x00060000) {
+			int statefile_version = get_statefile_version();
+			if (statefile_version >= 0x00060000 && statefile_version <= 0x00060003) {
 				if (!ctm->data && accessmode == 2 && currprefs.cpu_model <= 68010 && currprefs.cpu_cycle_exact && addr > regs.pc && addr < regs.pc + 20) {
 					return true;
 				}
@@ -1404,7 +1405,7 @@ static void set_x_funcs (void)
 
 	icache_fetch = get_longi;
 	icache_fetch_word = NULL;
-	if (currprefs.cpu_cycle_exact) {
+	if (currprefs.cpu_memory_cycle_exact) {
 		icache_fetch = mem_access_delay_longi_read_ce020;
 	}
 	if (currprefs.cpu_model >= 68040 && currprefs.cpu_memory_cycle_exact) {
@@ -2407,8 +2408,9 @@ static void activate_trace(void)
 void checkint(void)
 {
 	doint();
-	if (!m68k_accurate_ipl && !currprefs.cachesize && !(regs.spcflags & SPCFLAG_INT) && (regs.spcflags & SPCFLAG_DOINT))
+	if (!m68k_accurate_ipl && !currprefs.cachesize && !(regs.spcflags & SPCFLAG_INT) && (regs.spcflags & SPCFLAG_DOINT)) {
 		set_special(SPCFLAG_INT);
+	}
 }
 
 void REGPARAM2 MakeSR(void)
@@ -4646,7 +4648,7 @@ void doint(void)
 
 	if (m68k_interrupt_delay) {
 		if (!m68k_accurate_ipl && regs.ipl_pin > regs.intmask) {
-			set_special(SPCFLAG_INT);
+			set_special(SPCFLAG_DOINT);
 		}
 		return;
 	}
@@ -4821,7 +4823,7 @@ static int do_specialties (int cycles)
 			unset_special(SPCFLAG_UAEINT);
 		}
 
-		if (m68k_interrupt_delay) {
+		if (m68k_interrupt_delay && m68k_accurate_ipl) {
 			int ipl = time_for_interrupt();
 			if (ipl) {
 				unset_special(SPCFLAG_INT);
@@ -4830,7 +4832,7 @@ static int do_specialties (int cycles)
 		} else {
 			if (spcflags & SPCFLAG_INT) {
 				int intr = intlev();
-				unset_special (SPCFLAG_INT | SPCFLAG_DOINT);
+				unset_special(SPCFLAG_INT | SPCFLAG_DOINT);
 				if (intr > regs.intmask || (intr == 7 && intr > regs.lastipl)) {
 					do_interrupt(intr);
 				}
@@ -6634,6 +6636,10 @@ void m68k_go (int may_quit)
 
 			hsync_counter = 0;
 			vsync_counter = 0;
+			if (quit_program) {
+				set_cycles(start_cycles);
+				clear_events();
+			}
 			quit_program = 0;
 
 #ifdef SAVESTATE
@@ -6927,8 +6933,10 @@ void m68k_dumpstate(uaecptr *nextpc, uaecptr prevpc)
 		}
 	}
 	m68k_disasm (pc, nextpc, pc, 1);
-	if (nextpc)
+	if (nextpc) {
 		console_out_f (_T("Next PC: %08x\n"), *nextpc);
+		*nextpc = pc;
+	}
 }
 
 void m68k_dumpcache (bool dc)
@@ -6936,6 +6944,9 @@ void m68k_dumpcache (bool dc)
 	if (!currprefs.cpu_compatible)
 		return;
 	if (currprefs.cpu_model == 68020) {
+		if (dc) {
+			return;
+		}
 		for (int i = 0; i < CACHELINES020; i += 4) {
 			for (int j = 0; j < 4; j++) {
 				int s = i + j;

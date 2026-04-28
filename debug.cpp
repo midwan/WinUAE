@@ -213,7 +213,7 @@ static const TCHAR help[] = {
 	_T("  od                    Enable/disable Copper vpos/hpos tracing.\n")
 	_T("  ot                    Copper single step trace.\n")
 	_T("  ob <addr>             Copper breakpoint.\n")
-	_T("  H[H] <cnt>            Show PC history (HH=full CPU info) <cnt> instructions.\n")
+	_T("  H[H][s] <cnt>         Show PC history (HH=full CPU info, s=disable DMA info) <cnt> instructions.\n")
 	_T("  C <value>             Search for values like energy or lifes in games.\n")
 	_T("  mmu <fc>              Set current MMU translation function code for all debugging instructions.\n")
 	_T("  mmud                  Dump MMU tables.\n")
@@ -225,12 +225,12 @@ static const TCHAR help[] = {
 	_T("  W <addr> 'string'     Write into Amiga memory.\n")
 	_T("  Wf <addr> <endaddr-1> <bytes or string like above>, fill memory.\n")
 	_T("  Wc <addr> <endaddr-1> <destaddr>, copy memory.\n")
-	_T("  w <num> <address> <length> <R/W/I> <F/C/L/N> [V<value>[.x]] (read/write/opcode) (freeze/mustchange/logonly/nobreak).\n")
+	_T("  w <num> <address> <length> <R/W/I> <F/C/L/N> [V<value>[.x]] [<channel>] (read/write/opcode) (freeze/mustchange/logonly/nobreak).\n")
 	_T("                        Add/remove memory watchpoints.\n")
 	_T("  wd [<0-1>]            Enable illegal access logger. 1 = enable break.\n")
 	_T("  L <file> <addr> [<n>] Load a block of Amiga memory.\n")
 	_T("  S <file> <addr> <n>   Save a block of Amiga memory.\n")
-	_T("  s \"<string>\"/<values> [<addr>] [<endaddr-1>]\n")
+	_T("  s \"<string>\"/<values> [<addr>] [<endaddr-1>] [max results]\n")
 	_T("                        Search for string/bytes.\n")
 	_T("  T or Tt               Show exec tasks and their PCs.\n")
 	_T("  Td,Tl,Tr,Tp,Ts,TS,Ti,TO,TM,Tf Show devs, libs, resources, ports, semaphores,\n")
@@ -517,10 +517,11 @@ static bool iscancel (int counter)
 static bool isoperator(TCHAR **cp)
 {
 	TCHAR c = _totupper(**cp);
-	TCHAR c1 = _totupper((*cp)[1]);
+	TCHAR c1 = c ? _totupper((*cp)[1]) : 0;
+	TCHAR c2 = c1 ? _totupper((*cp)[2]) : 0;
 	return c == '+' || c == '-' || c == '/' || c == '*' || c == '(' || c == ')' ||
-		c == '|' || c == '&' || c == '^' || c == '=' || c == '>' || c == '<' ||
-		(c == 'R' && (c1 == 'L' || c1 == 'W' || c1 == 'B'));
+		c == '|' || c == '&' || c == '^' || c == '~' || c == '=' || c == '>' || c == '<' ||
+		(c == 'R' && (c1 == 'L' || c1 == 'W' || c1 == 'B') && c2 == '(');
 }
 
 static void ignore_ws (TCHAR **c)
@@ -626,6 +627,34 @@ static int getoperidx(TCHAR **c, bool *opersigned)
 	return -1;
 }
 
+static double f80todouble(floatx80 v)
+{
+	float_status st = { 0 };
+	union {
+		double d;
+		uae_u32 u[2];
+	} fval;
+	float64 v64 = floatx80_to_float64(v, &st);
+	fval.u[1] = v64 >> 32;
+	fval.u[0] = v64 >> 0;
+	return fval.d;
+}
+static floatx80 doubletof80(double d)
+{
+	float_status st = { 0 };
+	union {
+		double d;
+		uae_u32 u[2];
+	} fval;
+	fval.d = d;
+	return float64_to_floatx80(((uae_u64)fval.u[1] << 32) | (fval.u[0]), &st);
+}
+
+#define NUMTYTPE_S 5
+#define NUMTYTPE_D 6
+#define NUMTYTPE_X 7
+#define NUMTYTPE_P 8
+
 static const TCHAR *debugregs[] = {
 	_T("D0"),
 	_T("D1"),
@@ -664,6 +693,14 @@ static const TCHAR *debugregs[] = {
 	_T("FPIAR"),
 	_T("FPCR"),
 	_T("FPSR"),
+	_T("FP0"),
+	_T("FP1"),
+	_T("FP2"),
+	_T("FP3"),
+	_T("FP4"),
+	_T("FP5"),
+	_T("FP6"),
+	_T("FP7"),
 	NULL
 };
 
@@ -751,7 +788,7 @@ uae_u32 returnregx(int regid)
 	return 0;
 }
 
-static int readregx(TCHAR **c, uae_u32 *valp)
+static int readregx(TCHAR **c, uae_u32 *valp, floatx80 *valx80p)
 {
 	int idx;
 	uae_u32 addr;
@@ -765,6 +802,15 @@ static int readregx(TCHAR **c, uae_u32 *valp)
 	if (idx < 0) {
 		*c = old;
 		return 0;
+	}
+	if (idx >= BREAKPOINT_REG_FPx && idx < BREAKPOINT_REG_FPx + 8) {
+		int fpureg = idx - BREAKPOINT_REG_FPx;
+		if (currprefs.fpu_mode > 0) {
+			*valx80p = regs.fp[fpureg].fpx;
+		} else {
+			*valx80p = doubletof80(regs.fp[fpureg].fp);
+		}
+		return NUMTYTPE_X;
 	}
 	addr = returnregx(idx);
 	*valp = addr;
@@ -782,34 +828,6 @@ static bool checkisneg(TCHAR **c)
 	}
 	return false;
 }
-
-static double f80todouble(floatx80 v)
-{
-	float_status st = { 0 };
-	union {
-		double d;
-		uae_u32 u[2];
-	} fval;
-	float64 v64 = floatx80_to_float64(v, &st);
-	fval.u[1] = v64 >> 32;
-	fval.u[0] = v64 >> 0;
-	return fval.d;
-}
-static floatx80 doubletof80(double d)
-{
-	float_status st = { 0 };
-	union {
-		double d;
-		uae_u32 u[2];
-	} fval;
-	fval.d = d;
-	return float64_to_floatx80(((uae_u64)fval.u[1] << 32) | (fval.u[0]), &st);
-}
-
-#define NUMTYTPE_S 5
-#define NUMTYTPE_D 6
-#define NUMTYTPE_X 7
-#define NUMTYTPE_P 8
 
 static bool readbinx (TCHAR **c, uae_u32 *valp)
 {
@@ -995,8 +1013,10 @@ static int checkvaltype2(TCHAR **c, uae_u32 *val, floatx80 *valx80, TCHAR def)
 		return 2;
 	}
 	if (nc >= 'A' && nc <= 'Z' && nc != 'A' && nc != 'D') {
-		if (readregx(c, val))
-			return 1;
+		int ret = readregx(c, val, valx80);
+		if (ret) {
+			return ret;
+		}
 	}
 	TCHAR name[256];
 	name[0] = 0;
@@ -1296,7 +1316,10 @@ static void converter(TCHAR **c)
 		}
 	}
 	s[j] = 0;
-	if (debug_float) {
+
+	int intval = floatx80_to_int32(xf, &st);
+	floatx80 intx80 = int32_to_floatx80(intval);
+	if (debug_float || (intx80.high != xf.high || intx80.low != xf.low)) {
 		uae_u64 df = floatx80_to_float64(xf, &st);
 		uae_u32 sf = floatx80_to_float32(xf, &st);
 		console_out_f(_T("$%08X = %%%s = %u = %d ($%08X.S = $%08X%08X.D = $%04X.%08X%08X.X = %f)\n"), v, s, v, (uae_s32)v,
@@ -1394,7 +1417,7 @@ static uaecptr nextaddr(uaecptr addr, uaecptr last, uaecptr *endp, bool verbose,
 			console_out_f(_T("\n"));
 			*lfp = false;
 		}
-		console_out_f(_T("Scanning.. %08x - %08x (%s)\n"), start, addr, get_mem_bank(start).name);
+		console_out_f(_T("Scanning %08x - %08x (%s)\n"), start, addr - 1, get_mem_bank(start).name);
 	}
 
 	return start;
@@ -3265,12 +3288,17 @@ static void init_record_copper(void)
 		cop_record[0] = xmalloc(struct cop_rec, NR_COPPER_RECORDS);
 		cop_record[1] = xmalloc(struct cop_rec, NR_COPPER_RECORDS);
 	}
+	curr_cop_set = 0;
+	selected_cop_set = 0;
+	nr_cop_records[0] = nr_cop_records[1] = 0;
 }
 
 void record_copper_blitwait (uaecptr addr, int hpos, int vpos)
 {
 	int t = nr_cop_records[curr_cop_set];
-	init_record_copper();
+	if (!cop_record[0]) {
+		init_record_copper();
+	}
 	cop_record[curr_cop_set][t].bhpos = hpos;
 	cop_record[curr_cop_set][t].bvpos = vpos;
 }
@@ -3278,7 +3306,9 @@ void record_copper_blitwait (uaecptr addr, int hpos, int vpos)
 void record_copper (uaecptr addr, uaecptr nextaddr, uae_u16 word1, uae_u16 word2, int hpos, int vpos)
 {
 	int t = nr_cop_records[curr_cop_set];
-	init_record_copper();
+	if (!cop_record[0]) {
+		init_record_copper();
+	}
 	if (t < NR_COPPER_RECORDS) {
 		cop_record[curr_cop_set][t].addr = addr;
 		cop_record[curr_cop_set][t].nextaddr = nextaddr;
@@ -3405,6 +3435,7 @@ static int copper_debugger (TCHAR **c)
 			debug_copper = 0;
 		else
 			debug_copper = 1;
+		init_record_copper();
 		console_out_f (_T("Copper debugger %s.\n"), debug_copper ? _T("enabled") : _T("disabled"));
 	} else if (**c == 't') {
 		debug_copper = 1|2;
@@ -3491,8 +3522,9 @@ static void listcheater(int mode, int size)
 			console_out_f(_T("%08X=%04X "), ts->addr, b);
 		else
 			console_out_f(_T("%08X "), ts->addr);
-		if ((i % skip) == skip)
+		if ((i % skip) == skip - 1) {
 			console_out(_T("\n"));
+		}
 	}
 }
 
@@ -4958,17 +4990,22 @@ void memwatch_dump2 (TCHAR *buf, int bufsize, int num)
 	}
 }
 
-static void memwatch_dump (int num)
+static bool memwatch_dump(int num)
 {
 	TCHAR *buf;
 	int multiplier = num < 0 ? MEMWATCH_TOTAL : 1;
+	bool ret = false;
 
 	buf = xmalloc (TCHAR, 50 * multiplier);
 	if (!buf)
-		return;
-	memwatch_dump2 (buf, 50 * multiplier, num);
-	f_out (stdout, _T("%s"), buf);
+		return false;
+	memwatch_dump2(buf, 50 * multiplier, num);
+	if (buf[0]) {
+		f_out(stdout, _T("%s"), buf);
+		ret = true;
+	}
 	xfree (buf);
+	return ret;
 }
 
 static void memwatch (TCHAR **c)
@@ -4977,17 +5014,23 @@ static void memwatch (TCHAR **c)
 	struct memwatch_node *mwn;
 	TCHAR nc, *cp;
 	bool err;
+	bool enabled = false;
 
 	if (!memwatch_enabled) {
 		initialize_memwatch (0);
 		console_out (_T("Memwatch breakpoints enabled\n"));
 		memwatch_access_validator = 0;
+		enabled = true;
 	}
 
 	cp = *c;
 	ignore_ws (c);
 	if (!more_params (c)) {
-		memwatch_dump (-1);
+		if (!memwatch_dump(-1)) {
+			if (!enabled) {
+				console_out(_T("No memwatch breakpoints.\n"));
+			}
+		}
 		return;
 	}
 	nc = next_char (c);
@@ -5033,13 +5076,19 @@ static void memwatch (TCHAR **c)
 	}
 	*c = cp;
 	num = readint(c, NULL);
-	if (num < 0 || num >= MEMWATCH_TOTAL)
+	if (num < 0 || num >= MEMWATCH_TOTAL) {
 		return;
+	}
 	mwn = &mwnodes[num];
+	enabled = mwn->size != 0;
 	mwn->size = 0;
 	ignore_ws (c);
 	if (!more_params (c)) {
-		console_out_f (_T("Memwatch %d removed\n"), num);
+		if (enabled) {
+			console_out_f (_T("Memwatch %d removed\n"), num);
+		} else {
+			console_out_f (_T("Memwatch %d is not active\n"), num);
+		}
 		memwatch_setup ();
 		return;
 	}
@@ -6031,6 +6080,7 @@ static void breakfunc(uae_u32 v)
 	debug_hpos = -1;
 	debug_cycles(2);
 	set_special(SPCFLAG_BRK);
+	trace_mode = TRACE_IMMEDIATE;
 }
 
 void debug_hsync(void)
@@ -6201,9 +6251,13 @@ int instruction_breakpoint(TCHAR **c)
 			int got = 0;
 			for (i = 0; i < BREAKPOINT_TOTAL; i++) {
 				bpn = &bpnodes[i];
-				if (!bpn->enabled)
+				if (!bpn->enabled) {
 					continue;
-				console_out_f (_T("%d: %s %s %08x [%08x %08x]"), i, debugregs[bpn->type], debugoper[bpn->oper], bpn->value1, bpn->mask, bpn->value2);
+				}
+				console_out_f(_T("%d: %s %s %08x"), i, debugregs[bpn->type], debugoper[bpn->oper], bpn->value1);
+				if (bpn->mask || bpn->value2) {
+					console_out_f (_T(" [%08x %08x]"), bpn->mask, bpn->value2);
+				}
 				if (bpn->cnt > 0) {
 					console_out_f(_T(" N=%d"), bpn->cnt);
 				}
@@ -6410,6 +6464,7 @@ static void searchmem (TCHAR **cc)
 	}
 	if (sslen == 0)
 		return;
+	int max = 100;
 	ignore_ws (cc);
 	addr = 0xffffffff;
 	endaddr = lastaddr(addr);
@@ -6419,18 +6474,22 @@ static void searchmem (TCHAR **cc)
 		endaddr = lastaddr(addr);
 		if (more_params(cc)) {
 			endaddr = readhex(cc, NULL);
+			if (more_params(cc)) {
+				max = readint(cc, NULL);
+			}
 		}
 	}
-	console_out_f (_T("Searching from %08X to %08X..\n"), addr + 1, endaddr - 1);
+	console_out_f(_T("Searching from %08X to %08X\n"), addr + 1, endaddr - 1);
 	nextaddr_init(addr);
 	bool out = false;
+	int colcnt = 0;
 	while ((addr = nextaddr(addr, endaddr, NULL, true, &out)) != 0xffffffff) {
 		if (addr == endaddr)
 			break;
 		for (i = 0; i < sslen; i++) {
-			uae_u8 b = get_byte_debug (addr + i);
+			uae_u8 b = get_byte_debug(addr + i);
 			if (stringmode) {
-				if (tolower (b) != ss[i])
+				if (tolower(b) != ss[i])
 					break;
 			} else {
 				if (b != ss[i])
@@ -6439,21 +6498,27 @@ static void searchmem (TCHAR **cc)
 		}
 		if (i == sslen) {
 			got++;
-			console_out_f (_T(" %08X"), addr);
+			colcnt++;
+			if (colcnt > 8) {
+				colcnt = 1;
+				console_out_f(_T("\n"));
+			}
+			console_out_f(_T(" %08X"), addr);
 			out = true;
-			if (got > 100) {
-				console_out (_T("\nMore than 100 results, aborting.."));
+			if (got > max) {
+				console_out_f(_T("\nMore than %d results, aborting.."), max);
 				break;
 			}
 		}
 		if  (iscancel (65536)) {
-			console_out_f (_T("Aborted at %08X\n"), addr);
+			console_out_f(_T("Aborted at %08X\n"), addr);
 			break;
 		}
 	}
-	if (!got)
-		console_out (_T("nothing found"));
-	console_out (_T("\n"));
+	if (!got) {
+		console_out(_T("nothing found"));
+	}
+	console_out(_T("\n"));
 }
 
 static int staterecorder (TCHAR **cc)
@@ -6531,7 +6596,7 @@ static void debugtest_set (TCHAR **inptr)
 	}
 }
 
-static void debug_sprite (TCHAR **inptr)
+static void debug_sprite(TCHAR **inptr)
 {
 	uaecptr saddr, addr, addr2;
 	int xpos, xpos_ecs;
@@ -6539,37 +6604,50 @@ static void debug_sprite (TCHAR **inptr)
 	int ypose, ypose_ecs;
 	int attach;
 	uae_u64 w1, w2, ww1, ww2;
+	bool detectsize = true;
 	int size = 1, width;
 	int ecs, sh10;
 	int y, i;
-	TCHAR tmp[80];
+	TCHAR tmp[80], tmp2a[80], tmp2b[80];
 	int max = 14;
 
 	addr2 = 0;
 	ignore_ws(inptr);
 	addr = readhex(inptr, NULL);
 	ignore_ws(inptr);
-	if (more_params (inptr))
+	if (more_params (inptr)) {
 		size = readhex(inptr, NULL);
+		detectsize = false;
+	}
 	if (size != 1 && size != 2 && size != 4) {
 		addr2 = size;
+		detectsize = true;
 		ignore_ws(inptr);
-		if (more_params(inptr))
+		if (more_params(inptr)) {
 			size = readint(inptr, NULL);
-		if (size != 1 && size != 2 && size != 4)
-			size = 1;
+			detectsize = false;
+		}
 	}
+	if ((size != 1 && size != 2 && size != 4) || detectsize) {
+		size = 1;
+		if (get_word_debug(addr + 2) == 0 && get_word_debug(addr + 4) != 0 && get_word_debug(addr + 6) == 0) {
+			size = 2;
+		} else if (get_word_debug(addr + 2) == 0 && get_word_debug(addr + 4) == 0 && get_word_debug(addr + 6) == 0 && get_word_debug(addr + 8) != 0) {
+			size = 4;
+		}
+	}
+
 	for (;;) {
 		ecs = 0;
 		sh10 = 0;
 		saddr = addr;
 		width = size * 16;
-		w1 = get_word_debug (addr);
-		w2 = get_word_debug (addr + size * 2);
-		console_out_f (_T("    %06X "), addr);
+		w1 = get_word_debug(addr);
+		w2 = get_word_debug(addr + size * 2);
+		console_out_f(_T("        %06X "), addr);
 		for (i = 0; i < size * 2; i++)
-			console_out_f (_T("%04X "), get_word_debug (addr + i * 2));
-		console_out_f (_T("\n"));
+			console_out_f(_T("%04X "), get_word_debug(addr + i * 2));
+		console_out_f(_T("\n"));
 
 		ypos = (int)(w1 >> 8);
 		xpos = w1 & 255;
@@ -6604,73 +6682,91 @@ static void debug_sprite (TCHAR **inptr)
 			ypos = ypos_ecs;
 			ypose = ypose_ecs;
 		}
-
-		for (y = ypos; y < ypose; y++) {
+		int spritey = 0;
+		for (y = ypos; y < ypose + 1; y++) {
 			int x;
+			uaecptr prev_addr = addr, prev_addr2 = addr2;
 			addr += size * 4;
-			if (addr2)
+			if (addr2) {
 				addr2 += size * 4;
+			}
+			tmp[0] = 0;
+			tmp2a[0] = 0;
+			tmp2b[0] = 0;
 			if (size == 1) {
-				w1 = get_word_debug (addr);
-				w2 = get_word_debug (addr + 2);
+				w1 = get_word_debug(addr);
+				w2 = get_word_debug(addr + 2);
+				_stprintf(tmp2a, _T("%04X %04X "), (uae_u16)w1, (uae_u16)w2);
 				if (addr2) {
-					ww1 = get_word_debug (addr2);
-					ww2 = get_word_debug (addr2 + 2);
+					ww1 = get_word_debug(addr2);
+					ww2 = get_word_debug(addr2 + 2);
+					_stprintf(tmp2b, _T("%04X %04X "), (uae_u16)ww1, (uae_u16)ww2);
 				}
 			} else if (size == 2) {
-				w1 = get_long_debug (addr);
-				w2 = get_long_debug (addr + 4);
+				w1 = get_long_debug(addr);
+				w2 = get_long_debug(addr + 4);
+				_stprintf(tmp2a, _T("%08X %08X "), (uae_u32)w1, (uae_u32)w2);
 				if (addr2) {
-					ww1 = get_long_debug (addr2);
-					ww2 = get_long_debug (addr2 + 4);
+					ww1 = get_long_debug(addr2);
+					ww2 = get_long_debug(addr2 + 4);
+					_stprintf(tmp2b, _T("%08X %08X "), (uae_u32)ww1, (uae_u32)ww2);
 				}
 			} else if (size == 4) {
-				w1 = get_long_debug (addr + 0);
-				w2 = get_long_debug (addr + 8);
+				w1 = get_long_debug(addr + 0);
+				w2 = get_long_debug(addr + 8);
 				w1 <<= 32;
 				w2 <<= 32;
-				w1 |= get_long_debug (addr + 4);
-				w2 |= get_long_debug (addr + 12);
+				w1 |= get_long_debug(addr + 4);
+				w2 |= get_long_debug(addr + 12);
+				_stprintf(tmp2a, _T("%016llX %016llX "), w1, w2);
 				if (addr2) {
-					ww1 = get_long_debug (addr2 + 0);
-					ww2 = get_long_debug (addr2 + 8);
+					ww1 = get_long_debug(addr2 + 0);
+					ww2 = get_long_debug(addr2 + 8);
 					ww1 <<= 32;
 					ww2 <<= 32;
-					ww1 |= get_long_debug (addr2 + 4);
-					ww2 |= get_long_debug (addr2 + 12);
+					ww1 |= get_long_debug(addr2 + 4);
+					ww2 |= get_long_debug(addr2 + 12);
+					_stprintf(tmp2b, _T("%016llX %016llX "), ww1, ww2);
 				}
 			}
-			width = size * 16;
-			for (x = 0; x < width; x++) {
-				int v1 = w1 & 1;
-				int v2 = w2 & 1;
-				int v = v2 * 2 + v1;
-				w1 >>= 1;
-				w2 >>= 1;
-				if (addr2) {
-					int vv1 = ww1 & 1;
-					int vv2 = ww2 & 1;
-					int vv = vv2 * 2 + vv1;
-					ww1 >>= 1;
-					ww2 >>= 1;
-					v *= 4;
-					v += vv;
-					tmp[width - (x + 1)] = v >= 10 ? 'A' + v - 10 : v + '0';
-				} else {
-					tmp[width - (x + 1)] = v + '0';
+			if (y < ypose) {
+				width = size * 16;
+				for (x = 0; x < width; x++) {
+					int v1 = w1 & 1;
+					int v2 = w2 & 1;
+					int v = v2 * 2 + v1;
+					w1 >>= 1;
+					w2 >>= 1;
+					if (addr2) {
+						int vv1 = ww1 & 1;
+						int vv2 = ww2 & 1;
+						int vv = vv2 * 2 + vv1;
+						ww1 >>= 1;
+						ww2 >>= 1;
+						v *= 4;
+						v += vv;
+						tmp[width - (x + 1)] = v >= 10 ? 'A' + v - 10 : v + '0';
+					} else {
+						tmp[width - (x + 1)] = v + '0';
+					}
 				}
+				tmp[width] = 0;
+				spritey++;
+				console_out_f(_T("%3d %3d %06X %s%s%s\n"), y, spritey, addr, tmp2a, tmp2b, tmp);
+			} else {
+				console_out_f(_T("%3d     %06X %s%s\n"), y, addr, tmp2a, tmp2b);
+				addr = prev_addr;
+				addr2 = prev_addr2;
 			}
-			tmp[width] = 0;
-			console_out_f (_T("%3d %06X %s\n"), y, addr, tmp);
 		}
 
-		console_out_f (_T("Sprite address %08X, width = %d\n"), saddr, size * 16);
-		console_out_f (_T("OCS: StartX=%d StartY=%d EndY=%d\n"), xpos, ypos, ypose);
-		console_out_f (_T("ECS: StartX=%d (%d.%d) StartY=%d EndY=%d%s\n"), xpos_ecs, xpos_ecs / 4, xpos_ecs & 3, ypos_ecs, ypose_ecs, ecs ? _T(" (*)") : _T(""));
-		console_out_f (_T("Attach: %d. AGA SSCAN/SH10 bit: %d\n"), attach, sh10);
+		console_out_f(_T("Sprite address %08X, Width=%d\n"), saddr, size * 16);
+		console_out_f(_T("OCS: StartX=%d StartY=%d EndY=%d Height=%d\n"), xpos, ypos, ypose - 1, ypose - ypos);
+		console_out_f(_T("ECS: StartX=%d (%d.%d) StartY=%d EndY=%d Height=%d %s\n"), xpos_ecs, xpos_ecs / 4, xpos_ecs & 3, ypos_ecs, ypose_ecs - 1, ypose_ecs - ypos_ecs, ecs ? _T(" (*)") : _T(""));
+		console_out_f(_T("Attach: %d. AGA SSCAN/SH10 bit: %d\n"), attach, sh10);
 
 		addr += size * 4;
-		if (get_word_debug (addr) == 0 && get_word_debug (addr + size * 4) == 0)
+		if (get_word_debug(addr) == 0 && get_word_debug(addr + size * 4) == 0)
 			break;
 		max--;
 		if (max <= 0) {
@@ -6801,7 +6897,7 @@ static void find_ea (TCHAR **inptr)
 			}
 		}
 	}
-	console_out_f (_T("Searching from %08X to %08X\n"), addr + 1, end);
+	console_out_f (_T("Searching from %08X to %08X\n"), addr + 1, end - 1);
 	end2 = 0;
 	nextaddr_init(addr);
 	bool out = false;
@@ -6815,7 +6911,7 @@ static void find_ea (TCHAR **inptr)
 				out = true;
 				hits++;
 				if (hits > 100) {
-					console_out_f (_T("Too many hits. End addr = %08X\n"), addr);
+					console_out_f (_T("Too many hits. End addr = %08X\n"), addr - 1);
 					break;
 				}
 			}
@@ -7421,6 +7517,7 @@ static bool debug_line (TCHAR *input)
 				uae_u32 oldpc = m68k_getpc ();
 				int lastframes, lastvpos, lasthpos;
 				struct regstruct save_regs = regs;
+				bool dmadata = true;
 
 				badly = 0;
 				if (inptr[0] == 'H') {
@@ -7432,7 +7529,10 @@ static bool debug_line (TCHAR *input)
 					dmadbg = 1;
 					inptr++;
 				}
-
+				if (inptr[0] == 's') {
+					dmadata = false;
+					inptr++;
+				}
 				if (more_params(&inptr))
 					count = readint(&inptr, NULL);
 				else
@@ -7462,7 +7562,7 @@ static bool debug_line (TCHAR *input)
 						if (badly) {
 							m68k_dumpstate(NULL, 0xffffffff);
 						} else {
-							if (dmadbg && lastvpos >= 0) {
+							if (dmadbg && lastvpos >= 0 && dmadata) {
 								dma_disasm(lastframes, lastvpos, lasthpos, history[temp].fp, history[temp].vpos, history[temp].hpos);
 							}
 							lastframes = history[temp].fp;
@@ -7752,6 +7852,7 @@ static TCHAR input[MAX_LINEWIDTH];
 
 static void debug_1 (void)
 {
+	draw_denise_line_queue_flush();
 	open_console();
 	custom_dumpstate(0);
 	m68k_dumpstate(&nextpc, debug_pc);
@@ -7896,11 +7997,11 @@ static bool check_breakpoint(struct breakpoint_node *bpn, uaecptr pc)
 
 static bool check_breakpoint_count(struct breakpoint_node *bpn, uaecptr pc)
 {
+	bpn->cnt--;
 	if (bpn->cnt <= 0) {
 		return true;
 	}
 	console_out_f(_T("Breakpoint %d hit: PC=%08x, count=%d.\n"), bpn - bpnodes, pc, bpn->cnt);
-	bpn->cnt--;
 	return false;
 }
 
@@ -8059,6 +8160,8 @@ void debug (void)
 						if (line > 0 && line != trace_param[1])
 							bp = -1;
 					}
+				} else if (trace_mode == TRACE_IMMEDIATE) {
+					bp = -2;
 				}
 			}
 			if (!bp && bpnum < 0) {
@@ -8068,7 +8171,9 @@ void debug (void)
 			if (bpnum >= 0) {
 				console_out_f(_T("Breakpoint %d triggered.\n"), bpnum);
 			}
-			debug_cycles(1);
+			if (bp >= -1) {
+				debug_cycles(1);
+			}
 		}
 	} else {
 		memwatch_hit_msg(memwatch_triggered - 1);
