@@ -2201,8 +2201,9 @@ static void FillBoardInfo(TrapContext *ctx, uaecptr amigamemptr, struct LibResol
 	trap_put_byte(ctx, amigamemptr + PSSO_ModeInfo_first_union, 98);
 	trap_put_byte(ctx, amigamemptr + PSSO_ModeInfo_second_union, 14);
 
+	int freq = currprefs.gfx_apmode[GF_RTG].gfx_refreshrate;
 	trap_put_long(ctx, amigamemptr + PSSO_ModeInfo_PixelClock,
-		width * height * (currprefs.gfx_apmode[1].gfx_refreshrate ? abs (currprefs.gfx_apmode[1].gfx_refreshrate) : default_freq));
+		width * height * (freq ? abs(freq) : default_freq));
 }
 
 struct modeids {
@@ -2289,7 +2290,23 @@ static const struct modeids mi[] =
 	1440,1080, 188,
 	1600,1000, 189,
 	1600,1024, 190,
+	2048,1280, 191,
+	6144,3456, 192,
+	7680,4320, 193,
 	-1,-1,0
+};
+
+static int missmodes[] = {
+	 320,  200,
+	 320,  240,
+	 320,  256,
+	 640,  400,
+	 640,  480,
+	 640,  512,
+	 800,  600,
+	1024,  768,
+	1280, 1024,
+	-1
 };
 
 static int AssignModeID (int w, int h, int *unkcnt)
@@ -2431,8 +2448,8 @@ static int p96depth (int depth)
 
 static int _cdecl resolution_compare (const void *a, const void *b)
 {
-	struct PicassoResolution *ma = (struct PicassoResolution *)a;
-	struct PicassoResolution *mb = (struct PicassoResolution *)b;
+	struct PicassoResolution *ma = (struct PicassoResolution*)a;
+	struct PicassoResolution *mb = (struct PicassoResolution*)b;
 	if (ma->res.width < mb->res.width)
 		return -1;
 	if (ma->res.width > mb->res.width)
@@ -2443,8 +2460,6 @@ static int _cdecl resolution_compare (const void *a, const void *b)
 		return 1;
 	return 0;
 }
-
-static int missmodes[] = { 320, 200, 320, 240, 320, 256, 640, 400, 640, 480, 640, 512, 800, 600, 1024, 768, 1280, 1024, -1 };
 
 static int addresolutions(void)
 {

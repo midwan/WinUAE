@@ -10,6 +10,7 @@
 #define UAE_XWIN_H
 
 #include "uae/types.h"
+#include "uae/time.h"
 #include "machdep/rpt.h"
 
 typedef uae_u32 xcolnr;
@@ -102,9 +103,6 @@ struct vidbuffer
 	/* nominal size of image for centering */
 	int inwidth;
 	int inheight;
-	/* same but doublescan multiplier included */
-	int inwidth2;
-	int inheight2;
 	/* static, hardwired screen position and size (A2024) */
 	bool hardwiredpositioning;
 	/* extra width, chipset hpos extra in right border */
